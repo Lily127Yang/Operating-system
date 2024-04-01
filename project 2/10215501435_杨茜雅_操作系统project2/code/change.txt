@@ -1,0 +1,258 @@
+diff --git a/include/unistd.h b/include/unistd.h
+index 9d13199..bb7252d 100644
+--- a/include/unistd.h
++++ b/include/unistd.h
+@@ -100,6 +100,7 @@ size_t	 confstr(int, char *, size_t);
+ /* also declared in stdio.h */
+ char	*cuserid(char *);	/* obsolete */
+ #endif /* __CUSERID_DECLARED */
++int chrt(long );//添加chrt 函数定义
+ int	 dup(int);
+ int	 dup2(int, int);
+ int	 execl(const char *, const char *, ...);
+diff --git a/minix/commands/service/parse.c b/minix/commands/service/parse.c
+index 478d2fa..aa523b0 100644
+--- a/minix/commands/service/parse.c
++++ b/minix/commands/service/parse.c
+@@ -846,6 +846,7 @@ struct
+ 	{ "VMCTL",		SYS_VMCTL },
+ 	{ "MEMSET",		SYS_MEMSET },
+ 	{ "PADCONF",		SYS_PADCONF },
++	{ "CHRT", SYS_CHRT },
+ 	{ NULL,		0 }
+ };
+ 
+diff --git a/minix/include/minix/callnr.h b/minix/include/minix/callnr.h
+index 6030687..a9cea59 100644
+--- a/minix/include/minix/callnr.h
++++ b/minix/include/minix/callnr.h
+@@ -58,8 +58,9 @@
+ #define PM_GETEPINFO		(PM_BASE + 45)
+ #define PM_GETPROCNR		(PM_BASE + 46)
+ #define PM_GETSYSINFO		(PM_BASE + 47)
++#define PM_CHRT (PM_BASE + 48)
+ 
+-#define NR_PM_CALLS		48	/* highest number from base plus one */
++#define NR_PM_CALLS		49	/* highest number from base plus one */
+ 
+ /*===========================================================================*
+  *				Calls to VFS				     *
+diff --git a/minix/include/minix/com.h b/minix/include/minix/com.h
+index 637f77c..3679a1d 100644
+--- a/minix/include/minix/com.h
++++ b/minix/include/minix/com.h
+@@ -263,8 +263,10 @@
+ 
+ #  define SYS_PADCONF (KERNEL_CALL + 57)	/* sys_padconf() */
+ 
++# define SYS_CHRT (KERNEL_CALL + 58)
++
+ /* Total */
+-#define NR_SYS_CALLS	58	/* number of kernel calls */
++#define NR_SYS_CALLS	59	/* number of kernel calls */
+ 
+ #define SYS_CALL_MASK_SIZE BITMAP_CHUNKS(NR_SYS_CALLS)
+ 
+diff --git a/minix/include/minix/syslib.h b/minix/include/minix/syslib.h
+index a9ac487..2ed5b74 100644
+--- a/minix/include/minix/syslib.h
++++ b/minix/include/minix/syslib.h
+@@ -41,6 +41,7 @@ int sys_schedule(endpoint_t proc_ep, int priority, int quantum, int
+ 	cpu);
+ int sys_schedctl(unsigned flags, endpoint_t proc_ep, int priority, int
+ 	quantum, int cpu);
++int sys_chrt(endpoint_t proc_ep,long deadline);
+ 
+ /* Shorthands for sys_runctl() system call. */
+ #define sys_stop(proc_ep) sys_runctl(proc_ep, RC_STOP, 0)
+diff --git a/minix/kernel/config.h b/minix/kernel/config.h
+index a99b299..0a31805 100644
+--- a/minix/kernel/config.h
++++ b/minix/kernel/config.h
+@@ -16,6 +16,7 @@
+  * to keep all kernel calls enabled.
+  */
+ #define USE_FORK       	   1	/* fork a new process */
++#define USE_CHRT           1
+ #define USE_NEWMAP     	   1	/* set a new memory map */
+ #define USE_EXEC       	   1	/* update process after execute */
+ #define USE_CLEAR	   1	/* clean up after process exit */
+diff --git a/minix/kernel/proc.c b/minix/kernel/proc.c
+index 3dff67c..2e2d47e 100644
+--- a/minix/kernel/proc.c
++++ b/minix/kernel/proc.c
+@@ -1535,6 +1535,11 @@ void enqueue(
+  * This function can be used x-cpu as it always uses the queues of the cpu the
+  * process is assigned to.
+  */
++
++  if (rp->p_deadline >0)
++  {
++   rp->p_priority = 6;
++  }
+   int q = rp->p_priority;	 		/* scheduling queue to use */
+   struct proc **rdy_head, **rdy_tail;
+   
+@@ -1719,7 +1724,8 @@ static struct proc * pick_proc(void)
+  *
+  * This function always uses the run queues of the local cpu!
+  */
+-  register struct proc *rp;			/* process to run */
++  register struct proc *rp;	
++   register struct proc * temp;		/* process to run */
+   struct proc **rdy_head;
+   int q;				/* iterate over queues */
+ 
+@@ -1729,10 +1735,35 @@ static struct proc * pick_proc(void)
+    */
+   rdy_head = get_cpulocal_var(run_q_head);
+   for (q=0; q < NR_SCHED_QUEUES; q++) {	
++	//优先级队列为空时
+ 	if(!(rp = rdy_head[q])) {
+ 		TRACE(VF_PICKPROC, printf("cpu %d queue %d empty\n", cpuid, q););
+ 		continue;
+ 	}
++	//遍历优先级队列
++    //将剩余时间最小的进程移到队列首部
++    rp=rdy_head[q];
++    //temp记录下一个就绪的进程
++    temp=rp->p_nextready;
++    if(q==6){
++        //遍历链表
++        //选择剩余时间最少的进程,并放到队首
++        while(temp!=NULL){
++            if (temp->p_deadline > 0)
++            {
++                //如果当前进程结束或者temp进程剩余时间比当前进程更少
++                if (rp->p_deadline == 0|| (temp->p_deadline < rp->p_deadline))
++                {
++                    //并且temp进程可以运行
++                    if (proc_is_runnable(temp)){
++                        //替换当前进程
++                        rp = temp;
++					}
++                }
++            }
++            temp = temp->p_nextready;
++        }
++    }
+ 	assert(proc_is_runnable(rp));
+ 	if (priv(rp)->s_flags & BILLABLE)	 	
+ 		get_cpulocal_var(bill_ptr) = rp; /* bill for system time */
+diff --git a/minix/kernel/proc.h b/minix/kernel/proc.h
+index f311535..58f5656 100644
+--- a/minix/kernel/proc.h
++++ b/minix/kernel/proc.h
+@@ -59,7 +59,7 @@ struct proc {
+ 
+   clock_t p_virt_left;		/* number of ticks left on virtual timer */
+   clock_t p_prof_left;		/* number of ticks left on profile timer */
+-
++  long long p_deadline;     //设置deadline
+   u64_t p_cycles;		/* how many cycles did the process use */
+   u64_t p_kcall_cycles;		/* kernel cycles caused by this proc (kcall) */
+   u64_t p_kipc_cycles;		/* cycles caused by this proc (ipc) */
+diff --git a/minix/kernel/system.c b/minix/kernel/system.c
+index 2d1aee1..002ad07 100644
+--- a/minix/kernel/system.c
++++ b/minix/kernel/system.c
+@@ -192,6 +192,7 @@ void system_init(void)
+   /* Process management. */
+   map(SYS_FORK, do_fork); 		/* a process forked a new process */
+   map(SYS_EXEC, do_exec);		/* update process after execute */
++  map(SYS_CHRT,do_chrt);   //参考do_fork、do_exec 按照相应格式添加。
+   map(SYS_CLEAR, do_clear);		/* clean up after process exit */
+   map(SYS_EXIT, do_exit);		/* a system process wants to exit */
+   map(SYS_PRIVCTL, do_privctl);		/* system privileges control */
+diff --git a/minix/kernel/system.h b/minix/kernel/system.h
+index d7bd99b..429ca96 100644
+--- a/minix/kernel/system.h
++++ b/minix/kernel/system.h
+@@ -42,6 +42,11 @@ int do_fork(struct proc * caller, message *m_ptr);
+ #define do_fork NULL
+ #endif
+ 
++int do_chrt(struct proc * caller, message *m_ptr);
++#if ! USE_CHRT
++#define do_chrt NULL
++#endif
++
+ int do_clear(struct proc * caller, message *m_ptr);
+ #if ! USE_CLEAR
+ #define do_clear NULL
+diff --git a/minix/kernel/system/Makefile.inc b/minix/kernel/system/Makefile.inc
+index ef8cf2e..df1af1b 100644
+--- a/minix/kernel/system/Makefile.inc
++++ b/minix/kernel/system/Makefile.inc
+@@ -39,7 +39,8 @@ SRCS+= 	\
+ 	do_mcontext.c \
+ 	do_schedule.c \
+ 	do_schedctl.c \
+-	do_statectl.c
++	do_statectl.c \
++	do_chrt.c
+ 
+ .if ${MACHINE_ARCH} == "i386"
+ SRCS+=  \
+diff --git a/minix/lib/libc/sys/Makefile.inc b/minix/lib/libc/sys/Makefile.inc
+index 38fa560..8d0c665 100644
+--- a/minix/lib/libc/sys/Makefile.inc
++++ b/minix/lib/libc/sys/Makefile.inc
+@@ -22,7 +22,7 @@ SRCS+= 	accept.c access.c adjtime.c bind.c brk.c sbrk.c m_closefrom.c getsid.c \
+ 	sync.c syscall.c sysuname.c truncate.c umask.c unlink.c write.c \
+ 	utimensat.c utimes.c futimes.c lutimes.c futimens.c \
+ 	_exit.c _ucontext.c environ.c __getcwd.c vfork.c sizeup.c init.c \
+-	getrusage.c setrlimit.c setpgid.c
++	getrusage.c setrlimit.c setpgid.c chrt.c 
+ 
+ # Minix specific syscalls / utils.
+ SRCS+= cprofile.c sprofile.c stack_utils.c _mcontext.c
+diff --git a/minix/lib/libsys/Makefile b/minix/lib/libsys/Makefile
+index e926f69..caadcd5 100644
+--- a/minix/lib/libsys/Makefile
++++ b/minix/lib/libsys/Makefile
+@@ -51,6 +51,7 @@ SRCS+=  \
+ 	stacktrace.c \
+ 	sys_abort.c \
+ 	sys_clear.c \
++	sys_chrt.c \
+ 	sys_cprof.c \
+ 	sys_diagctl.c \
+ 	sys_endsig.c \
+diff --git a/minix/servers/pm/Makefile b/minix/servers/pm/Makefile
+index 75f4c54..165e0a1 100644
+--- a/minix/servers/pm/Makefile
++++ b/minix/servers/pm/Makefile
+@@ -4,7 +4,7 @@
+ PROG=	pm
+ SRCS=	main.c forkexit.c exec.c time.c alarm.c \
+ 	signal.c utility.c table.c trace.c getset.c misc.c \
+-	profile.c mcontext.c schedule.c
++	profile.c mcontext.c schedule.c chrt.c
+ 
+ DPADD+=	${LIBSYS} ${LIBTIMERS}
+ LDADD+=	-lsys -ltimers
+diff --git a/minix/servers/pm/proto.h b/minix/servers/pm/proto.h
+index 0d27fc8..e61787e 100644
+--- a/minix/servers/pm/proto.h
++++ b/minix/servers/pm/proto.h
+@@ -19,6 +19,7 @@ void exec_restart(struct mproc *rmp, int result, vir_bytes pc, vir_bytes sp,
+ /* forkexit.c */
+ int do_fork(void);
+ int do_srv_fork(void);
++int do_chrt(void);//添加chrt 函数定义
+ int do_exit(void);
+ void exit_proc(struct mproc *rmp, int exit_status, int dump_core);
+ void exit_restart(struct mproc *rmp, int dump_core);
+diff --git a/minix/servers/pm/table.c b/minix/servers/pm/table.c
+index 8c8e24a..f2cb12d 100644
+--- a/minix/servers/pm/table.c
++++ b/minix/servers/pm/table.c
+@@ -14,6 +14,7 @@
+ int (* const call_vec[NR_PM_CALLS])(void) = {
+ 	CALL(PM_EXIT)		= do_exit,		/* _exit(2) */
+ 	CALL(PM_FORK)		= do_fork,		/* fork(2) */
++	CALL(PM_CHRT)       = do_chrt, //参照fork、exit 定义进行添加。
+ 	CALL(PM_WAITPID)	= do_waitpid,		/* waitpid(2) */
+ 	CALL(PM_GETPID)		= do_get,		/* get[p]pid(2) */
+ 	CALL(PM_SETUID)		= do_set,		/* setuid(2) */
